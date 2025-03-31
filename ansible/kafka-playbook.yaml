@@ -7,59 +7,46 @@
         update_cache: yes
         install_recommends: yes
 
-    - name: Install Docker
+    - name: Install java 17 JRE
       apt:
         pkg:
-          - ca-certificates
           - curl
-          - gnupg
- 
-    - name: Set up apt repository
+          - openjdk-17-jre
+
+    - name: See if kafka is downloaded
+      stat:
+        path: /usr/bin/kafka/LICENSE
+      register: kafka_download
+
+    - name: Download kafka
       shell: |
-        sudo apt-get update
-        sudo apt-get install ca-certificates curl
-        sudo install -m 0755 -d /etc/apt/keyrings
-        sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-        sudo chmod a+r /etc/apt/keyrings/docker.asc
+        mkdir ~/Downloads
+        curl "https://dlcdn.apache.org/kafka/4.0.0/kafka_2.13-4.0.0.tgz" -o ~/Downloads/kafka.tgz
+        sudo mkdir /usr/bin/kafka
+        sudo tar -xvzf ~/Downloads/kafka.tgz -C /usr/bin/kafka --strip 1
+      when: kafka_download.stat.exists == False
 
-        # Add the repository to Apt sources:
-        echo \
-          "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
-          $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | \
-            sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-          sudo apt-get update
-
-    - name: Install docker packages
-      apt:
-        pkg:
-          - docker-ce
-          - docker-ce-cli
-          - containerd.io
-          - docker-buildx-plugin
-          - docker-compose-plugin
-
-    - name: Run docker hello world
+    - name: Configure kafka
       shell: |
-        sudo service docker start
-        sudo docker run hello-world
+        cd /usr/bin/kafka
+        KAFKA_CLUSTER_ID="$(bin/kafka-storage.sh random-uuid)"
+        bin/kafka-storage.sh format --standalone -t $KAFKA_CLUSTER_ID -c config/server.properties
 
-    - name: Install confluent cli apt public key
+    - name: Copy kafka.service
+      copy:
+        src: kafka.service
+        dest: /lib/systemd/system/kafka.service
+
+    - name: Reload system config
+      shell: systemctl daemon-reload
+
+  tasks:
+    - name: start kafka service daemon
+      systemd:
+        name: kafka.service
+        enabled: true
+        state: started
+
+    - name: Create topic
       shell: |
-        sudo mkdir -p /etc/apt/keyrings
-        curl https://packages.confluent.io/confluent-cli/deb/archive.key | sudo gpg --dearmor -o /etc/apt/keyrings/confluent-cli.gpg
-        sudo chmod go+r /etc/apt/keyrings/confluent-cli.gpg
-        echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/confluent-cli.gpg] https://packages.confluent.io/confluent-cli/deb stable main" | sudo tee /etc/apt/sources.list.d/confluent-cli.list >/dev/null
-        sudo apt-get update
-
-    - name: Install confluent cli
-      apt:
-        pkg:
-          - confluent-cli=3.48.0
-
-    - name: Test confluent isntall
-      shell: sudo confluent version
-
-    - name: Start kafka broker
-      shell: |
-        sudo confluent local kafka start
-        sudo confluent local kafka topic create purchases
+        /usr/bin/kafka/bin/kafka-topics.sh --create --topic test-events --bootstrap-server localhost:9092
