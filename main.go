@@ -1,16 +1,18 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"github.com/IBM/sarama"
 	"log"
+	"log/slog"
 	"strings"
 )
 
 var (
 	brokers = flag.String("brokers", "127.0.0.1:9092", "Kafka brokers to connect to")
-	topic   = flag.String("topic", "test-events", "Kafka topic to publish to")
+	topic   = flag.String("topic", "test-events", "Kafka topic to publish to / receive from")
 )
 
 func main() {
@@ -22,35 +24,22 @@ func main() {
 		log.Fatalf("Error creating producer: %v", err)
 	}
 	defer producer.Close()
-	Send(producer, *topic)
-	consumer, err := newConsumer(brokerList)
-	partitions, pErr := consumer.Partitions(*topic)
+
+	consumer, cErr := newConsumer(brokerList)
+	if cErr != nil {
+		log.Fatalf("Error creating consumer: %v", cErr)
+	}
 	defer consumer.Close()
-	if pErr != nil {
-		log.Fatalf("Error getting partitions: %v", pErr)
-	}
-	fmt.Println("Current high water marks:", consumer.HighWaterMarks())
-	//wg := &sync.WaitGroup{}
-	for _, p := range partitions {
-		fmt.Printf("Partition: %d\n", p)
-		//wg.Add(1)
-		pCons, cErr := consumer.ConsumePartition(*topic, p, sarama.OffsetOldest)
-		if cErr != nil {
-			log.Fatalf("Error consuming partition %d: %v", p, cErr)
-		}
-		//go func() {
-		//	defer wg.Done()
-		for m := range pCons.Messages() {
-			strMessage := string(m.Value)
-			//fmt.Println(strMessage)
-			fmt.Printf("Read message from partition %s for offset %v, block timestamp %v, headers %v\n", strMessage, m.Offset, m.Timestamp, m.Headers)
-		}
-		//}()
 
-	}
+	client := KafkaClient{consumer, producer, *topic}
+	client.Send("Hi world")
+	client.Read()
+}
 
-	//wg.Wait()
-
+type KafkaClient struct {
+	consumer sarama.Consumer
+	producer sarama.SyncProducer
+	topic    string
 }
 
 func newConsumer(brokerList []string) (sarama.Consumer, error) {
@@ -58,15 +47,17 @@ func newConsumer(brokerList []string) (sarama.Consumer, error) {
 	config.Version = sarama.DefaultVersion
 	config.Consumer.Return.Errors = true
 	config.Consumer.Offsets.Initial = sarama.OffsetOldest
-	return sarama.NewConsumer(brokerList, nil)
+	return sarama.NewConsumer(brokerList, config)
 }
 
-func Send(producer sarama.SyncProducer, topic string) {
-	partition, offset, err := producer.SendMessage(&sarama.ProducerMessage{Topic: topic, Value: sarama.StringEncoder("hello again world")})
+func (c KafkaClient) Send(message string) error {
+	msg := &sarama.ProducerMessage{Topic: c.topic, Value: sarama.StringEncoder(message)}
+	partition, offset, err := c.producer.SendMessage(msg)
 	if err != nil {
-		log.Fatalf("Error sending message: %v", err)
+		return err
 	}
-	log.Printf("Message Sent to partition %d with offset %d", partition, offset)
+	slog.Debug("Message sent", "partition", partition, "offset", offset)
+	return nil
 }
 
 func newProducer(brokerList []string) (sarama.SyncProducer, error) {
@@ -76,4 +67,24 @@ func newProducer(brokerList []string) (sarama.SyncProducer, error) {
 	config.Producer.Return.Successes = true
 	config.Producer.Retry.Max = 10
 	return sarama.NewSyncProducer(brokerList, config)
+}
+
+func (c KafkaClient) Read() error {
+	partitions, pErr := c.consumer.Partitions(*topic)
+	if pErr != nil {
+		return errors.New(fmt.Sprintf("Error getting partitions: %v", pErr))
+	}
+	slog.Debug("Current high water marks:", c.consumer.HighWaterMarks())
+	for _, p := range partitions {
+		slog.Debug("Partition: %d\n", p)
+		pCons, cErr := c.consumer.ConsumePartition(*topic, p, sarama.OffsetOldest)
+		if cErr != nil {
+			return errors.New(fmt.Sprintf("Error consuming partition %d: %v", p, cErr))
+		}
+		for m := range pCons.Messages() {
+			strMessage := string(m.Value)
+			slog.Info("Received message", "msg", strMessage, "offset", m.Offset)
+		}
+	}
+	return nil
 }
